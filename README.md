@@ -35,15 +35,21 @@ Point it at any iOS project and it generates the full `fastlane/` structure, wri
 
 ## Install
 
-**Ask Claude Code** (easiest):
-
-> Install the appstore skill from https://github.com/mikwiseman/appstore-skill
-
-**Or one-line shell** (from your project root):
+**Step 1** — Run from your iOS project root:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mikwiseman/appstore-skill/main/install.sh | bash
 ```
+
+**Step 2** — Start a new Claude Code session. Skills are loaded at startup, so `/appstore` won't be available in an already-running session.
+
+**Step 3** — Use the skill:
+
+```
+/appstore
+```
+
+That's it. The skill auto-detects your project and walks you through everything.
 
 ## What it generates
 
