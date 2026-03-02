@@ -1,57 +1,262 @@
 ---
-description: Full App Store pipeline — metadata, screenshots, preview dashboard, and upload to App Store Connect.
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent
-argument-hint: [full|screenshots|metadata|preview|upload]
+description: Zero to App Store — generates fastlane structure, metadata (with Exa SEO research), screenshots (Gemini + Playwright), HTML preview, and upload.
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, mcp__exa__web_search_exa, mcp__exa__get_code_context_exa
+argument-hint: [full|setup|metadata|screenshots|preview|upload]
 ---
 
-# App Store Pipeline
+# App Store Pipeline — Zero to App Store
 
-You are running the App Store pipeline. This handles everything for App Store publication: metadata generation, screenshot creation, visual HTML preview, and upload to App Store Connect.
+You are running the App Store pipeline. This skill takes a developer from **zero** (just an iOS project) to a fully published App Store listing: fastlane structure, metadata, screenshots, preview, and upload.
 
 ## ARGUMENTS
 
 The user can pass an optional mode:
 
 - **full** (default, or no argument): Run the entire pipeline end-to-end
-- **screenshots**: Only regenerate screenshots (capture, backgrounds, compose, export)
-- **metadata**: Only generate/refresh all metadata files
-- **preview**: Only generate the HTML preview dashboard
-- **upload**: Only upload to App Store Connect via fastlane
+- **setup**: Create the `fastlane/` directory structure from scratch
+- **metadata**: Generate/refresh all metadata files (with Exa SEO research)
+- **screenshots**: Full screenshot pipeline (capture, AI backgrounds, compose, export)
+- **preview**: Generate the HTML preview dashboard
+- **upload**: Upload to App Store Connect via fastlane
 
 Requested mode: `$ARGUMENTS`
 
 If no argument was given or argument is empty, run **full** pipeline.
 
+---
+
 ## PROJECT AUTO-DETECTION
 
-Before running any mode, detect the project context automatically:
-
-### Locales
-Scan `fastlane/metadata/` for subdirectories (exclude `review_information` and `trade_representative_contact_information`). Each subdirectory is a locale (e.g., `en-US`, `ja`, `de-DE`).
-
-### App Name
-Read `name.txt` from the first detected locale directory.
-
-### Bundle ID
-Read from `fastlane/Appfile` — look for `app_identifier` value.
+Before running any mode, detect the project context automatically. This works **without** an existing `fastlane/` directory.
 
 ### Xcode Scheme
-Run: `xcodebuild -list -json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['project']['schemes'][0])"` — use the first scheme.
+```bash
+xcodebuild -list -json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['project']['schemes'][0])"
+```
 
-### Simulator
-Run: `xcrun simctl list devices available -j | python3 -c "import sys,json; ds=json.load(sys.stdin)['devices']; print([d['name'] for r in ds for d in ds[r] if 'iPhone' in d['name'] and d['isAvailable']][-1])"` — use the latest available iPhone simulator.
+### Bundle ID
+Parse `*.xcodeproj/project.pbxproj` for `PRODUCT_BUNDLE_IDENTIFIER`:
+```bash
+grep -m1 'PRODUCT_BUNDLE_IDENTIFIER' *.xcodeproj/project.pbxproj | sed 's/.*= *"\{0,1\}\([^";]*\)"\{0,1\};.*/\1/'
+```
 
-### Screenshots
-Check `fastlane/screenshots/` for existing screenshot PNGs per locale.
+### Simulator (UDID-based — see Simulator Best Practices below)
+Get the latest available iPhone Pro Max simulator and extract its UDID:
+```bash
+xcrun simctl list devices available -j | python3 -c "
+import sys, json
+data = json.load(sys.stdin)['devices']
+sims = [(d['udid'], d['name']) for r in data for d in data[r] if 'Pro Max' in d['name'] and d['isAvailable']]
+if sims: print(f'{sims[-1][0]}|{sims[-1][1]}')
+else:
+    sims = [(d['udid'], d['name']) for r in data for d in data[r] if 'iPhone' in d['name'] and d['isAvailable']]
+    if sims: print(f'{sims[-1][0]}|{sims[-1][1]}')
+"
+```
+Store both the UDID and name. **Always use the UDID** in subsequent `simctl` commands.
 
 ### App Icon
-Search for `AppIcon.appiconset/AppIcon*.png` via recursive glob from the project root.
+```bash
+find . -path "*/AppIcon.appiconset/AppIcon*.png" -type f 2>/dev/null | head -1
+```
+
+### Existing Localizations
+Scan for localization files to suggest locales:
+```bash
+# .xcstrings files
+find . -name "*.xcstrings" -not -path "*/.*" 2>/dev/null
+# .lproj directories
+find . -name "*.lproj" -not -path "*/.*" -type d 2>/dev/null | sed 's/.*\///' | sort -u
+# .strings files
+find . -name "*.strings" -not -path "*/.*" 2>/dev/null
+```
+
+### Existing Fastlane (if present)
+If `fastlane/metadata/` exists, scan for locale subdirectories (exclude `review_information` and `trade_representative_contact_information`). If `fastlane/Appfile` exists, read `app_identifier`.
+
+---
+
+## IOS SIMULATOR BEST PRACTICES
+
+These practices ensure reliable, reproducible simulator automation. Follow them in all screenshot and testing workflows.
+
+### 1. Always Use UDIDs, Not Device Names
+Device names can be ambiguous (multiple runtimes may have the same name). Always resolve to a UDID first and use it for all subsequent commands:
+```bash
+# Get UDID once
+SIMULATOR_UDID=$(xcrun simctl list devices available -j | python3 -c "
+import sys, json
+data = json.load(sys.stdin)['devices']
+sims = [(d['udid'], d['name']) for r in data for d in data[r] if 'Pro Max' in d['name'] and d['isAvailable']]
+print(sims[-1][0] if sims else '')
+")
+
+# Use UDID everywhere
+xcrun simctl boot "$SIMULATOR_UDID"
+xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
+xcrun simctl io "$SIMULATOR_UDID" screenshot output.png
+```
+
+### 2. Boot Once, Reuse Across Captures
+Boot the simulator once at the start of the pipeline. Do NOT boot/shutdown between each screenshot:
+```bash
+xcrun simctl boot "$SIMULATOR_UDID" 2>/dev/null || true  # OK if already booted
+# ... capture all screenshots ...
+xcrun simctl shutdown "$SIMULATOR_UDID"  # Only at the very end
+```
+
+### 3. Use Deep Links for Navigation
+Instead of trying to tap through UI, use URL schemes or `xcrun simctl openurl` to navigate directly to specific screens:
+```bash
+xcrun simctl openurl "$SIMULATOR_UDID" "myapp://tab?name=spending"
+```
+If the app supports launch arguments for screen navigation, use those:
+```bash
+xcrun simctl launch "$SIMULATOR_UDID" "com.example.app" --tab spending
+```
+
+### 4. Deterministic Waits Instead of Fixed Sleeps
+Prefer checking for app readiness rather than `sleep 3`:
+```bash
+# Wait for app to launch (check process list)
+for i in $(seq 1 10); do
+    xcrun simctl get_app_container "$SIMULATOR_UDID" "$BUNDLE_ID" 2>/dev/null && break
+    sleep 0.5
+done
+# Then wait a bit for UI to render
+sleep 2
+```
+When `sleep` is unavoidable, use 2-3 seconds for initial launch and 1 second between screen transitions.
+
+### 5. Set Appearance Before App Launch
+Set dark/light mode before launching the app, not after:
+```bash
+xcrun simctl ui "$SIMULATOR_UDID" appearance dark
+xcrun simctl launch "$SIMULATOR_UDID" "$BUNDLE_ID"
+```
+
+### 6. Clean State Between Locale Switches
+When switching locales, terminate and relaunch the app:
+```bash
+xcrun simctl terminate "$SIMULATOR_UDID" "$BUNDLE_ID" 2>/dev/null || true
+xcrun simctl launch "$SIMULATOR_UDID" "$BUNDLE_ID" -AppleLanguages "($LANG)" -AppleLocale "$LOCALE"
+```
+
+### 7. Shutdown After the Pipeline
+Always shut down the simulator when done to avoid state leakage:
+```bash
+xcrun simctl shutdown "$SIMULATOR_UDID" 2>/dev/null || true
+```
+
+### 8. Verify Screenshots Immediately
+After each capture, verify the file exists and has reasonable dimensions:
+```bash
+sips -g pixelWidth -g pixelHeight "output.png" 2>/dev/null
+```
+
+---
+
+## ASK USER ONCE
+
+Before proceeding with setup or metadata generation, ask the user for:
+
+1. **Locales**: Which locales to generate. Suggest based on detected localizations (e.g., if `.xcstrings` has `ja` and `de`, suggest `en-US`, `ja`, `de-DE`). At minimum, suggest `en-US`.
+
+2. **Contact info for App Review**: First name, last name, email, phone number.
+
+Only ask once — reuse these values across all modes in the pipeline.
+
+---
+
+## MODE: setup
+
+Create the full `fastlane/` directory structure from scratch. This mode is idempotent — it won't overwrite existing files.
+
+### Step 1: Create directory structure
+
+For each locale the user selected:
+```
+fastlane/
+  metadata/
+    {locale}/           # e.g., en-US/, ja/, de-DE/
+    review_information/
+  screenshots/
+    {locale}/
+  Appfile
+  Fastfile
+  app_store_rating_config.json
+```
+
+### Step 2: Write Appfile
+```ruby
+app_identifier("{BUNDLE_ID}")  # Auto-detected
+```
+
+### Step 3: Write Fastfile
+```ruby
+default_platform(:ios)
+
+platform :ios do
+  desc "Upload metadata, screenshots, and ratings to App Store Connect"
+  lane :upload_all do
+    deliver(
+      skip_binary_upload: true,
+      skip_app_version_update: true,
+      force: true,
+      precheck_include_in_app_purchases: false,
+      submission_information: {
+        add_id_info_uses_idfa: false
+      }
+    )
+  end
+end
+```
+
+### Step 4: Write empty metadata stubs
+
+For each locale, create empty files:
+- `name.txt`, `subtitle.txt`, `keywords.txt`, `description.txt`, `promotional_text.txt`, `release_notes.txt`
+- `privacy_url.txt`, `support_url.txt`, `marketing_url.txt`
+
+For `review_information/`:
+- `first_name.txt`, `last_name.txt`, `email_address.txt`, `phone_number.txt`, `notes.txt`
+- Pre-fill with the contact info the user provided.
+
+Shared files:
+- `copyright.txt` (e.g., "2026 CompanyName")
+- `primary_category.txt` (empty)
+- `secondary_category.txt` (empty)
+
+### Step 5: Write default age rating config
+
+Write `fastlane/app_store_rating_config.json`:
+```json
+{
+  "CARTOON_FANTASY_VIOLENCE": 0,
+  "REALISTIC_VIOLENCE": 0,
+  "PROLONGED_GRAPHIC_SADISTIC_REALISTIC_VIOLENCE": 0,
+  "PROFANITY_CRUDE_HUMOR": 0,
+  "MATURE_SUGGESTIVE": 0,
+  "HORROR": 0,
+  "MEDICAL_TREATMENT_INFO": 0,
+  "ALCOHOL_TOBACCO_DRUGS": 0,
+  "GAMBLING": 0,
+  "SEXUAL_CONTENT_NUDITY": 0,
+  "GRAPHIC_SEXUAL_CONTENT_NUDITY": 0,
+  "UNRESTRICTED_WEB_ACCESS": 0,
+  "GAMBLING_CONTESTS": 0
+}
+```
+
+### Step 6: Confirm
+
+List all created files and directories. Tell the user the setup is complete.
 
 ---
 
 ## MODE: metadata
 
-Generate or refresh ALL App Store metadata files by analyzing the current codebase.
+Generate or refresh ALL App Store metadata files by analyzing the current codebase and researching competitors/SEO via Exa.
 
 ### Step 1: Read the codebase
 
@@ -63,7 +268,21 @@ Read these files to understand the current state of the app:
 4. **Recent changes**: Run `git log --oneline -20` to understand recent development
 5. **Existing metadata**: Read all files in `fastlane/metadata/` to understand what currently exists
 
-### Step 2: Write metadata files
+### Step 2: Exa research
+
+Use Exa MCP tools to research competitors and SEO keywords. First get the current date:
+```bash
+date "+%Y-%m-%d %B %Y"
+```
+
+Then run these searches:
+1. **Competitors**: `mcp__exa__web_search_exa("best [app category] apps iOS App Store [MONTH] [YEAR]")` — understand the competitive landscape
+2. **ASO keywords**: `mcp__exa__web_search_exa("[app category] app store optimization keywords [MONTH] [YEAR]")` — find high-volume search terms
+3. **Writing patterns**: `mcp__exa__get_code_context_exa("app store metadata best practices description keywords")` — learn effective metadata writing patterns
+
+Use these insights to write better keywords, descriptions, and subtitles that compete effectively.
+
+### Step 3: Write metadata files
 
 Write or update these files with enforced character limits:
 
@@ -104,14 +323,18 @@ Update if app features have changed (gambling, violence, etc.).
 
 - **Write idiomatic text for each locale** — NOT machine-translated English. Each locale should read as if written natively by a speaker of that language.
 - **Character limits are hard limits**: Count characters carefully. For keywords, count the entire string including commas.
-- **SEO keywords**: Research App Store search terms relevant to the app's category. Include high-volume terms.
+- **SEO keywords**: Use insights from Exa research. Include high-volume terms relevant to the app's category.
 - **release_notes.txt**: Summarize what's new based on recent git history. If this is an initial release, write first-release notes.
+
+### Step 4: Show summary
+
+Show the user a summary of all generated metadata — app name, subtitle, keywords, description length, etc. Ask for approval before proceeding.
 
 ---
 
 ## MODE: screenshots
 
-Run the full screenshot pipeline: capture from simulator, generate AI backgrounds, compose HTML, and export final PNGs.
+Run the full screenshot pipeline: capture from simulator, generate AI backgrounds with Gemini Nano Banana 2, compose HTML, and export final PNGs.
 
 **Target size**: 1290x2796 (iPhone Pro Max 6.7" App Store requirement)
 
@@ -128,7 +351,7 @@ python3 -c "from google import genai; from playwright.sync_api import sync_playw
 python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(); b.close(); p.stop(); print('playwright OK')" 2>&1
 ```
 
-If `GEMINI_API_KEY` is not set, ask the user to provide it (needed for AI background generation via Gemini).
+If `GEMINI_API_KEY` is not set, ask the user to provide it (needed for Gemini Nano Banana 2 image generation).
 
 If Python deps are missing, install them:
 ```bash
@@ -138,68 +361,119 @@ python3 -m playwright install chromium
 
 ### Step 2: Analyze the app's screens
 
-Read the app's SwiftUI views / storyboards to identify the **main screens** that should be showcased in App Store screenshots. Typically 3-5 screens that highlight core features.
+Read the app's SwiftUI views to identify the **main screens** that should be showcased in App Store screenshots. Typically 3-5 screens that highlight core features.
 
 For each screen, determine:
 - A short identifier (e.g., `01_plan`, `02_spending`)
-- Which tab or navigation path leads to it
+- Which tab or navigation path leads to it (prefer URL schemes / deep links)
 - Marketing title and subtitle for each locale
 
 Ask the user to confirm the screen list and marketing copy before proceeding.
 
 ### Step 3: Capture raw screenshots from simulator
 
-For each locale and each screen:
+Follow the **iOS Simulator Best Practices** section above. Key workflow:
 
 ```bash
-# Boot simulator (use auto-detected device)
-SIMULATOR_ID=$(xcrun simctl list devices available | grep "<DEVICE>" | head -1 | grep -oE '[A-F0-9-]{36}')
-xcrun simctl boot "$SIMULATOR_ID" 2>/dev/null || true
+# 1. Get simulator UDID (from auto-detection)
+SIMULATOR_UDID="<detected-udid>"
 
-# Build the app
-xcodebuild build-for-testing -scheme "<SCHEME>" -destination "platform=iOS Simulator,name=<DEVICE>" -derivedDataPath build/screenshots -quiet
+# 2. Boot once
+xcrun simctl boot "$SIMULATOR_UDID" 2>/dev/null || true
 
-# Install the app
+# 3. Build the app
+xcodebuild build -scheme "<SCHEME>" \
+    -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+    -derivedDataPath build/screenshots -quiet 2>&1 | tail -5
+
+# 4. Find and install the app
 APP_PATH=$(find build/screenshots -name "*.app" -path "*/Debug-iphonesimulator/*" | head -1)
-xcrun simctl install "$SIMULATOR_ID" "$APP_PATH"
+xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
 
-# Set dark mode
-xcrun simctl ui "$SIMULATOR_ID" appearance dark
+# 5. Set dark mode BEFORE launching
+xcrun simctl ui "$SIMULATOR_UDID" appearance dark
 
-# For each locale/screen: launch app, wait for UI, capture
-xcrun simctl launch "$SIMULATOR_ID" "<BUNDLE_ID>" -AppleLanguages "(<lang>)" -AppleLocale "<locale>"
-sleep 3
-xcrun simctl io "$SIMULATOR_ID" screenshot "fastlane/screenshots/<locale>/<screen>.png"
+# 6. For each locale:
+for LOCALE in en-US ja de-DE; do
+    # Map locale to language code
+    LANG_CODE="${LOCALE%%-*}"  # en, ja, de
+
+    # For each screen:
+    for SCREEN in 01_plan 02_spending 03_detail; do
+        # Terminate previous instance
+        xcrun simctl terminate "$SIMULATOR_UDID" "$BUNDLE_ID" 2>/dev/null || true
+
+        # Launch with locale
+        xcrun simctl launch "$SIMULATOR_UDID" "$BUNDLE_ID" \
+            -AppleLanguages "($LANG_CODE)" -AppleLocale "$LOCALE"
+
+        # Navigate to screen (via deep link if supported)
+        # xcrun simctl openurl "$SIMULATOR_UDID" "myapp://screen/$SCREEN"
+
+        # Wait for UI to render
+        sleep 2
+
+        # Capture
+        mkdir -p "fastlane/screenshots/$LOCALE"
+        xcrun simctl io "$SIMULATOR_UDID" screenshot \
+            "fastlane/screenshots/$LOCALE/${SCREEN}.png"
+
+        # Verify capture
+        sips -g pixelWidth -g pixelHeight \
+            "fastlane/screenshots/$LOCALE/${SCREEN}.png" 2>/dev/null
+    done
+done
+
+# 7. Shutdown when done
+xcrun simctl shutdown "$SIMULATOR_UDID" 2>/dev/null || true
 ```
 
-If the app supports launch arguments for navigating to specific screens (e.g., `--tab plan`), use them. Otherwise, you may need to navigate manually or ask the user how to reach each screen.
+If the app doesn't support deep links or launch arguments for navigation, tell the user which screens need to be navigated to manually, or explore SwiftUI views for `TabView` / `NavigationStack` patterns to determine how to reach each screen.
 
-### Step 4: Generate AI backgrounds with Gemini
+### Step 4: Generate AI backgrounds with Gemini Nano Banana 2
 
-For each screen, generate a unique abstract background using the Gemini Flash Image API (Nanobanana2):
+Use the **Nano Banana 2** model (`gemini-3.1-flash-image-preview`) for background generation:
 
 ```python
 from google import genai
 from google.genai import types
+import os
 
-client = genai.Client(api_key=api_key)
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-response = client.models.generate_content(
-    model="gemini-2.0-flash-preview-image-generation",
-    contents="Create a 1290x2796 abstract background image. Dark background. "
-             "Minimal geometric design with subtle shapes and gradients. "
-             "Very clean, modern aesthetic. No text, no objects, no people. "
-             "Suitable as a phone wallpaper background behind a device mockup.",
-    config=types.GenerateContentConfig(
-        response_modalities=["IMAGE", "TEXT"],
-    ),
-)
+# Each screen gets a distinct color theme
+color_themes = {
+    "01_plan": "deep teal and dark cyan",
+    "02_spending": "warm amber and dark bronze",
+    "03_detail": "muted purple and dark violet",
+    "04_stats": "forest green and dark emerald",
+    "05_settings": "slate blue and dark navy",
+}
+
+for screen, colors in color_themes.items():
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-image-preview",
+        contents=(
+            f"Create a 1290x2796 abstract background image. "
+            f"Dark background with {colors} tones. "
+            f"Minimal geometric design with subtle shapes and gradients. "
+            f"Very clean, modern aesthetic. No text, no objects, no people. "
+            f"Suitable as a phone wallpaper background behind a device mockup."
+        ),
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+        ),
+    )
+
+    for part in response.parts:
+        if part.inline_data is not None:
+            image = part.as_image()
+            image.save(f"build/backgrounds/{screen}_bg.png")
 ```
-
-Each screen should have a distinct color theme (e.g., teal, amber, purple). Save to `build/backgrounds/<screen>_bg.png`.
 
 Then upscale to exact target size:
 ```bash
+mkdir -p build/backgrounds
 sips -z 2796 1290 build/backgrounds/*_bg.png
 ```
 
@@ -212,7 +486,7 @@ For each locale and screen, generate an HTML composition at 1x scale (430x932 CS
 - Device frame with the raw screenshot (rounded corners, shadow, ~68% of page height)
 - All images embedded as base64 data URIs for self-contained HTML
 
-Save to `build/compositions/<locale>/<screen>.html`.
+Save to `build/compositions/{locale}/{screen}.html`.
 
 **Key dimensions** (at 1x logical scale):
 - Page: 430x932
@@ -239,7 +513,7 @@ with sync_playwright() as p:
     page.screenshot(path=output_path, full_page=False)
 ```
 
-Save final screenshots to `fastlane/screenshots/<locale>/<screen>_framed.png`.
+Save final screenshots to `fastlane/screenshots/{locale}/{screen}_framed.png`.
 
 ### Step 7: Verify
 
@@ -277,6 +551,12 @@ The file auto-opens in the browser. Use `--no-open` to skip.
 
 Upload everything to App Store Connect via fastlane.
 
+First verify fastlane is configured:
+```bash
+test -f fastlane/Appfile && test -f fastlane/Fastfile && echo "fastlane OK" || echo "Run /appstore setup first"
+```
+
+Then upload:
 ```bash
 fastlane ios upload_all
 ```
@@ -289,19 +569,19 @@ Verify: Check output for "fastlane.tools finished successfully".
 
 ## MODE: full
 
-Run the complete pipeline in order:
+Run the complete pipeline in order. This is the **zero to App Store** flow.
 
-### 1. Prerequisites
+### 1. Setup
 
-Auto-detect project context (locales, app name, bundle ID, etc.).
+Check if `fastlane/` exists. If not, run the **setup** mode to create the full directory structure. Ask the user for locales and contact info.
 
 ### 2. Metadata
 
-Check if metadata files exist and look current. If any are missing or stale, run the **metadata** mode to generate/refresh them. Tell the user what was updated.
+Run the **metadata** mode. Read the codebase, research via Exa, generate all metadata files. Show summary and ask for approval.
 
 ### 3. Screenshots
 
-Run the full **screenshots** pipeline (capture → AI backgrounds → compose → export).
+Run the full **screenshots** pipeline (capture → Nano Banana 2 backgrounds → compose → export).
 
 ### 4. Preview
 

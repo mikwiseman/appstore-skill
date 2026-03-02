@@ -773,8 +773,12 @@ def main():
     no_open = "--no-open" in sys.argv
 
     if not METADATA_DIR.is_dir():
-        print(f"Error: {METADATA_DIR} not found. Run this from a project with fastlane/metadata/.", file=sys.stderr)
-        sys.exit(1)
+        print(
+            "No fastlane/metadata/ directory found.\n"
+            "Run /appstore or /appstore setup first to create the fastlane structure.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
 
     locales = detect_locales()
     if not locales:
