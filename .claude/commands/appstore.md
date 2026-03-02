@@ -905,9 +905,11 @@ test -f fastlane/Appfile && test -f fastlane/Fastfile && echo "OK" || echo "MISS
 
 If missing, tell the user: "Fastlane config doesn't exist yet. Let me create it." Then run the setup steps from MODE: setup (Appfile + Fastfile only).
 
-### Step 3: Check App Store Connect authentication
+### Step 3: Check App Store Connect authentication (MANDATORY BEFORE UPLOAD)
 
-This is the critical step. Check for an existing API key:
+**CRITICAL: You MUST complete this step and have valid authentication BEFORE running `fastlane ios upload_all`. NEVER attempt the upload without confirmed auth. Do NOT skip this step.**
+
+Check for an existing API key:
 
 ```bash
 # Check for API key file
@@ -921,9 +923,9 @@ echo "FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD: ${FASTLANE_APPLE_APPLICATION
 **If `fastlane/api_key.json` exists**, read it and confirm with the user:
 > "Found an existing API key configuration. Want to use it, or set up a new one?"
 
-**If no authentication is configured**, walk the user through API key setup:
+**If no authentication is configured**, walk the user through API key setup. Do NOT proceed to Step 4 until auth is configured:
 
-> "To upload to App Store Connect, you need an API key. This is a one-time setup. I'll walk you through it step by step."
+> "Before we can upload, we need to set up App Store Connect authentication. This is a one-time setup — I'll walk you through it step by step."
 
 #### Interactive API Key Setup
 
@@ -996,7 +998,9 @@ If it fails, show the error and help debug:
 - "Key file not found" → wrong path, ask user to verify
 - "Unauthorized" → key may not have the right permissions, guide user to check role in ASC
 
-### Step 4: Upload
+### Step 4: Upload (only after Step 3 is complete)
+
+**CRITICAL: Only run this step if Step 3 confirmed valid authentication exists (api_key.json or environment variables). If auth is not configured, go back to Step 3. NEVER run fastlane without auth — it will fail.**
 
 Tell the user: "Everything is set up. Uploading metadata and screenshots to App Store Connect now..."
 
