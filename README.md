@@ -21,24 +21,16 @@ Works with any iOS project that uses fastlane. Auto-detects locales, app name, a
 
 ## Install
 
-**One-line install** (run from your project root):
+**Ask Claude Code** (easiest — just paste this into Claude Code):
+
+> Install the appstore skill from https://github.com/mikwiseman/appstore-skill
+
+Claude will download both files into your project automatically.
+
+**Or one-line shell** (from your project root):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mikwiseman/appstore-skill/main/install.sh | bash
-```
-
-**Manual install:**
-
-```bash
-mkdir -p .claude/commands scripts
-
-curl -fsSL https://raw.githubusercontent.com/mikwiseman/appstore-skill/main/.claude/commands/appstore.md \
-  -o .claude/commands/appstore.md
-
-curl -fsSL https://raw.githubusercontent.com/mikwiseman/appstore-skill/main/scripts/preview_appstore.py \
-  -o scripts/preview_appstore.py
-
-chmod +x scripts/preview_appstore.py
 ```
 
 ## Usage
