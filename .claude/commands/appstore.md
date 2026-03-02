@@ -25,54 +25,222 @@ If no argument was given or argument is empty, run **full** pipeline.
 
 ---
 
+## PREFLIGHT CHECKS
+
+Run these checks **before every mode** to understand what's available. Report results to the user as a status summary, then proceed with what's available.
+
+### 1. Platform check
+
+```bash
+uname -s
+```
+If not `Darwin`, stop and tell the user: "This skill requires macOS with Xcode. It cannot run on Linux or Windows."
+
+### 2. Xcode check
+
+```bash
+xcode-select -p 2>/dev/null && echo "xcode OK" || echo "xcode MISSING"
+```
+If missing, tell the user: "Install Xcode Command Line Tools: `xcode-select --install`"
+
+### 3. Python check
+
+```bash
+python3 --version 2>/dev/null
+```
+If missing or below 3.9, tell the user to install Python 3.9+.
+
+### 4. Project detection
+
+Try to find an Xcode project or workspace:
+```bash
+# Check for .xcodeproj
+ls -d *.xcodeproj 2>/dev/null | head -1
+
+# If no .xcodeproj, check for .xcworkspace (CocoaPods / SPM workspace)
+ls -d *.xcworkspace 2>/dev/null | head -1
+```
+
+**Edge case — multiple projects:** If more than one `.xcodeproj` exists, ask the user which one to use.
+
+**Edge case — workspace only:** If only `.xcworkspace` exists (common with CocoaPods), use `-workspace` flag instead of `-project` in all `xcodebuild` commands:
+```bash
+# With .xcodeproj:
+xcodebuild -list -json 2>/dev/null
+
+# With .xcworkspace:
+xcodebuild -workspace "*.xcworkspace" -list -json 2>/dev/null
+```
+
+**Edge case — no project at all:** If neither exists, tell the user: "No Xcode project found. Run this from the root of an iOS project directory."
+
+### 5. Git check
+
+```bash
+git rev-parse --is-inside-work-tree 2>/dev/null && echo "git OK" || echo "git MISSING"
+```
+If Git is not initialized, skip `git log` in metadata mode. Not a blocker.
+
+### 6. Exa MCP availability
+
+Try to determine if Exa MCP tools are available. **Do not try to call them during preflight** — just note availability based on whether you have access to `mcp__exa__web_search_exa` in your tool list.
+
+If Exa is NOT available:
+- Metadata mode still works — skip the Exa research step and write metadata based on codebase analysis alone.
+- Tell the user: "Exa MCP not configured — skipping competitor/SEO research. Metadata will be based on codebase analysis. For better results, configure Exa MCP (https://exa.ai)."
+
+### 7. Mode-specific checks
+
+**For `screenshots` mode**, also check:
+```bash
+# GEMINI_API_KEY
+echo "GEMINI_API_KEY: ${GEMINI_API_KEY:+SET}"
+
+# google-genai + Pillow (both needed for image generation)
+python3 -c "from google import genai; from PIL import Image; print('genai+pil OK')" 2>&1
+
+# Playwright + Chromium
+python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(); b.close(); p.stop(); print('playwright OK')" 2>&1
+```
+
+- **No `GEMINI_API_KEY`**: Ask user to provide it. If they can't, offer to skip AI backgrounds and use solid dark gradient backgrounds instead (CSS-only, no Gemini needed).
+- **No `google-genai`**: `pip3 install google-genai`
+- **No `Pillow`**: `pip3 install Pillow` (needed for `part.as_image()` — Gemini SDK uses PIL internally)
+- **No `playwright`**: `pip3 install playwright && python3 -m playwright install chromium`
+- **Playwright installed but no Chromium**: `python3 -m playwright install chromium`
+
+**For `upload` mode**, also check:
+```bash
+which fastlane 2>/dev/null && echo "fastlane OK" || echo "fastlane MISSING"
+```
+If fastlane is not installed, tell the user: "Install fastlane: `gem install fastlane` or `brew install fastlane`"
+
+**For `preview` mode**, also check:
+```bash
+test -f scripts/preview_appstore.py && echo "preview script OK" || echo "preview script MISSING"
+```
+If missing, download it:
+```bash
+mkdir -p scripts
+curl -fsSL "https://raw.githubusercontent.com/mikwiseman/appstore-skill/main/scripts/preview_appstore.py" -o scripts/preview_appstore.py
+chmod +x scripts/preview_appstore.py
+```
+
+### Preflight summary
+
+After all checks, show a brief status report:
+```
+Preflight:
+  Platform: macOS ✓
+  Xcode: [version] ✓
+  Python: [version] ✓
+  Project: [name].xcodeproj ✓
+  Git: ✓
+  Exa MCP: [available/not configured]
+  Gemini: [API key set/not set]
+  Fastlane: [installed/not installed]
+```
+
+Then proceed with the requested mode.
+
+---
+
 ## PROJECT AUTO-DETECTION
 
-Before running any mode, detect the project context automatically. This works **without** an existing `fastlane/` directory.
+After preflight, detect project context automatically. This works **without** an existing `fastlane/` directory.
 
 ### Xcode Scheme
+
 ```bash
-xcodebuild -list -json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['project']['schemes'][0])"
+# For .xcodeproj:
+xcodebuild -list -json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); schemes=d.get('project',d.get('workspace',{})).get('schemes',[]); print(schemes[0] if schemes else '')"
+
+# For .xcworkspace:
+xcodebuild -workspace "*.xcworkspace" -list -json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); schemes=d.get('project',d.get('workspace',{})).get('schemes',[]); print(schemes[0] if schemes else '')"
 ```
+
+**Edge case — multiple schemes:** If there are multiple schemes, list them and ask the user which one to use. Filter out test schemes (names ending in `Tests`, `UITests`).
+
+**Edge case — no schemes:** If `xcodebuild -list` returns no schemes, tell the user: "No Xcode schemes found. Open the project in Xcode and verify a scheme exists."
 
 ### Bundle ID
+
 Parse `*.xcodeproj/project.pbxproj` for `PRODUCT_BUNDLE_IDENTIFIER`:
 ```bash
-grep -m1 'PRODUCT_BUNDLE_IDENTIFIER' *.xcodeproj/project.pbxproj | sed 's/.*= *"\{0,1\}\([^";]*\)"\{0,1\};.*/\1/'
+grep 'PRODUCT_BUNDLE_IDENTIFIER' *.xcodeproj/project.pbxproj | grep -v '//' | sed 's/.*= *"\{0,1\}\([^";]*\)"\{0,1\};.*/\1/' | sort -u | head -1
 ```
 
+**Edge case — variable references:** If the result contains `$(` (e.g., `$(PRODUCT_BUNDLE_IDENTIFIER:default)`, `$(BASE_BUNDLE_IDENTIFIER).dev`), try to resolve it:
+```bash
+# Try xcodebuild to resolve the actual value
+xcodebuild -scheme "<SCHEME>" -showBuildSettings 2>/dev/null | grep 'PRODUCT_BUNDLE_IDENTIFIER' | awk '{print $3}'
+```
+If it still can't be resolved, ask the user for their bundle ID.
+
+**Edge case — no bundle ID found:** Ask the user to provide it manually.
+
 ### Simulator (UDID-based — see Simulator Best Practices below)
+
 Get the latest available iPhone Pro Max simulator and extract its UDID:
 ```bash
 xcrun simctl list devices available -j | python3 -c "
 import sys, json
 data = json.load(sys.stdin)['devices']
+# Prefer Pro Max for 6.7\" screenshots
 sims = [(d['udid'], d['name']) for r in data for d in data[r] if 'Pro Max' in d['name'] and d['isAvailable']]
-if sims: print(f'{sims[-1][0]}|{sims[-1][1]}')
+if sims:
+    print(f'{sims[-1][0]}|{sims[-1][1]}')
 else:
-    sims = [(d['udid'], d['name']) for r in data for d in data[r] if 'iPhone' in d['name'] and d['isAvailable']]
-    if sims: print(f'{sims[-1][0]}|{sims[-1][1]}')
+    # Fall back to any Pro model
+    sims = [(d['udid'], d['name']) for r in data for d in data[r] if 'Pro' in d['name'] and 'iPhone' in d['name'] and d['isAvailable']]
+    if sims:
+        print(f'{sims[-1][0]}|{sims[-1][1]}')
+    else:
+        # Fall back to any iPhone
+        sims = [(d['udid'], d['name']) for r in data for d in data[r] if 'iPhone' in d['name'] and d['isAvailable']]
+        if sims:
+            print(f'{sims[-1][0]}|{sims[-1][1]}')
+        else:
+            print('NONE')
 "
 ```
 Store both the UDID and name. **Always use the UDID** in subsequent `simctl` commands.
+
+**Edge case — no simulators at all:** Tell the user: "No iPhone simulators found. Open Xcode > Settings > Components and download an iOS simulator runtime."
+
+**Edge case — no Pro Max simulator:** A non-Pro Max simulator works fine but produces screenshots at a different resolution. Tell the user which simulator is being used and that screenshots may need resizing for App Store submission (target is 1290x2796 for 6.7").
 
 ### App Icon
 ```bash
 find . -path "*/AppIcon.appiconset/AppIcon*.png" -type f 2>/dev/null | head -1
 ```
 
+**Edge case — no app icon found:** Not a blocker. The preview dashboard will show without an icon. Tell the user: "No app icon found — preview will render without it."
+
 ### Existing Localizations
+
 Scan for localization files to suggest locales:
 ```bash
-# .xcstrings files
-find . -name "*.xcstrings" -not -path "*/.*" 2>/dev/null
+# .xcstrings files — extract language codes from JSON keys
+find . -name "*.xcstrings" -not -path "*/.*" 2>/dev/null | head -1 | xargs python3 -c "
+import sys, json
+if sys.argv[1:]:
+    data = json.load(open(sys.argv[1]))
+    langs = set()
+    for s in data.get('strings', {}).values():
+        langs.update(s.get('localizations', {}).keys())
+    print(' '.join(sorted(langs)))
+" 2>/dev/null
+
 # .lproj directories
-find . -name "*.lproj" -not -path "*/.*" -type d 2>/dev/null | sed 's/.*\///' | sort -u
-# .strings files
-find . -name "*.strings" -not -path "*/.*" 2>/dev/null
+find . -name "*.lproj" -not -path "*/.*" -type d 2>/dev/null | sed 's/.*\///' | sed 's/\.lproj$//' | sort -u
 ```
 
+**Edge case — no localizations found:** Suggest `en-US` as the only locale. The user can add more later.
+
 ### Existing Fastlane (if present)
-If `fastlane/metadata/` exists, scan for locale subdirectories (exclude `review_information` and `trade_representative_contact_information`). If `fastlane/Appfile` exists, read `app_identifier`.
+
+If `fastlane/metadata/` exists, scan for locale subdirectories (exclude `review_information` and `trade_representative_contact_information`). If `fastlane/Appfile` exists, read `app_identifier` — this overrides the bundle ID from pbxproj.
 
 ---
 
@@ -115,6 +283,10 @@ If the app supports launch arguments for screen navigation, use those:
 xcrun simctl launch "$SIMULATOR_UDID" "com.example.app" --tab spending
 ```
 
+**Edge case — no deep links:** If the app doesn't register any URL scheme (check `Info.plist` for `CFBundleURLSchemes`), you have two options:
+1. Launch the app and tell the user to manually navigate to each screen, then trigger the screenshot capture.
+2. Explore the SwiftUI views for `TabView` / `NavigationStack` patterns and add launch arguments to the app (requires code changes — ask the user first).
+
 ### 4. Deterministic Waits Instead of Fixed Sleeps
 Prefer checking for app readiness rather than `sleep 3`:
 ```bash
@@ -153,6 +325,16 @@ After each capture, verify the file exists and has reasonable dimensions:
 ```bash
 sips -g pixelWidth -g pixelHeight "output.png" 2>/dev/null
 ```
+**Edge case — blank screenshot:** If `pixelWidth` and `pixelHeight` are suspiciously small (< 100px) or the file size is < 10KB, the app likely hasn't rendered yet. Wait longer and retry (up to 3 attempts with 2-second intervals).
+
+### 9. Handle Simulator Boot Failure
+```bash
+xcrun simctl boot "$SIMULATOR_UDID" 2>&1
+```
+If boot fails with "Unable to boot device in current state: Booted", the simulator is already running — that's fine, continue.
+If boot fails with other errors, try:
+1. `xcrun simctl shutdown "$SIMULATOR_UDID" 2>/dev/null; sleep 1; xcrun simctl boot "$SIMULATOR_UDID"`
+2. If that fails: "Simulator failed to boot. Try opening Simulator.app manually and booting the device."
 
 ---
 
@@ -160,9 +342,9 @@ sips -g pixelWidth -g pixelHeight "output.png" 2>/dev/null
 
 Before proceeding with setup or metadata generation, ask the user for:
 
-1. **Locales**: Which locales to generate. Suggest based on detected localizations (e.g., if `.xcstrings` has `ja` and `de`, suggest `en-US`, `ja`, `de-DE`). At minimum, suggest `en-US`.
+1. **Locales**: Which locales to generate. Suggest based on detected localizations (e.g., if `.xcstrings` has `ja` and `de`, suggest `en-US`, `ja`, `de-DE`). If no localizations were detected, suggest `en-US` only. At minimum, always include `en-US`.
 
-2. **Contact info for App Review**: First name, last name, email, phone number.
+2. **Contact info for App Review**: First name, last name, email, phone number. If `fastlane/metadata/review_information/` already has this data, show it and ask if it's still correct.
 
 Only ask once — reuse these values across all modes in the pipeline.
 
@@ -170,7 +352,7 @@ Only ask once — reuse these values across all modes in the pipeline.
 
 ## MODE: setup
 
-Create the full `fastlane/` directory structure from scratch. This mode is idempotent — it won't overwrite existing files.
+Create the full `fastlane/` directory structure from scratch. This mode is **idempotent** — it creates missing files/directories but does NOT overwrite existing ones.
 
 ### Step 1: Create directory structure
 
@@ -187,10 +369,17 @@ fastlane/
   app_store_rating_config.json
 ```
 
+Use `mkdir -p` for directories. For files, check if they exist before writing:
+```bash
+# Example — only write if file doesn't exist:
+test -f fastlane/Appfile || echo 'app_identifier("com.example.app")' > fastlane/Appfile
+```
+
 ### Step 2: Write Appfile
 ```ruby
 app_identifier("{BUNDLE_ID}")  # Auto-detected
 ```
+**Edge case — bundle ID not detected:** If auto-detection failed and the user provided the bundle ID, use that. If neither is available, write a placeholder and tell the user to fill it in: `app_identifier("YOUR_BUNDLE_ID_HERE")`.
 
 ### Step 3: Write Fastfile
 ```ruby
@@ -214,7 +403,7 @@ end
 
 ### Step 4: Write empty metadata stubs
 
-For each locale, create empty files:
+For each locale, create empty files (only if they don't already exist):
 - `name.txt`, `subtitle.txt`, `keywords.txt`, `description.txt`, `promotional_text.txt`, `release_notes.txt`
 - `privacy_url.txt`, `support_url.txt`, `marketing_url.txt`
 
@@ -229,7 +418,7 @@ Shared files:
 
 ### Step 5: Write default age rating config
 
-Write `fastlane/app_store_rating_config.json`:
+Write `fastlane/app_store_rating_config.json` (only if it doesn't exist):
 ```json
 {
   "CARTOON_FANTASY_VIOLENCE": 0,
@@ -252,11 +441,16 @@ Write `fastlane/app_store_rating_config.json`:
 
 List all created files and directories. Tell the user the setup is complete.
 
+**Edge case — `fastlane/` already fully set up:** If all files already exist, tell the user: "Fastlane structure already exists. No changes made. Run `/appstore metadata` to refresh metadata content."
+
 ---
 
 ## MODE: metadata
 
-Generate or refresh ALL App Store metadata files by analyzing the current codebase and researching competitors/SEO via Exa.
+Generate or refresh ALL App Store metadata files by analyzing the current codebase and (optionally) researching competitors/SEO via Exa.
+
+### Prerequisite check
+Verify `fastlane/metadata/` exists with at least one locale directory. If not, tell the user: "No fastlane metadata structure found. Run `/appstore setup` first." and stop.
 
 ### Step 1: Read the codebase
 
@@ -265,12 +459,12 @@ Read these files to understand the current state of the app:
 1. **Features & UI**: Read all SwiftUI views — understand what screens exist, what they do, what the user experience is
 2. **Localizations**: Read localization files (`.xcstrings`, `.strings`, `.lproj`) — understand all user-facing strings
 3. **Data models**: Read data models — understand the data architecture
-4. **Recent changes**: Run `git log --oneline -20` to understand recent development
+4. **Recent changes**: Run `git log --oneline -20` to understand recent development (**skip if Git not available** — just note "Git not available, skipping recent changes analysis")
 5. **Existing metadata**: Read all files in `fastlane/metadata/` to understand what currently exists
 
-### Step 2: Exa research
+### Step 2: Exa research (if available)
 
-Use Exa MCP tools to research competitors and SEO keywords. First get the current date:
+**If Exa MCP is available**, use it to research competitors and SEO keywords. First get the current date:
 ```bash
 date "+%Y-%m-%d %B %Y"
 ```
@@ -281,6 +475,10 @@ Then run these searches:
 3. **Writing patterns**: `mcp__exa__get_code_context_exa("app store metadata best practices description keywords")` — learn effective metadata writing patterns
 
 Use these insights to write better keywords, descriptions, and subtitles that compete effectively.
+
+**If Exa MCP is NOT available**, skip this step entirely. Write metadata based solely on codebase analysis. Tell the user: "Exa MCP not available — writing metadata from codebase analysis only. For SEO-optimized metadata, configure Exa MCP and re-run `/appstore metadata`."
+
+**Edge case — Exa errors:** If an Exa call fails (rate limit, API error, empty results), log the error and continue without that data. Do not let Exa failures block metadata generation.
 
 ### Step 3: Write metadata files
 
@@ -323,12 +521,12 @@ Update if app features have changed (gambling, violence, etc.).
 
 - **Write idiomatic text for each locale** — NOT machine-translated English. Each locale should read as if written natively by a speaker of that language.
 - **Character limits are hard limits**: Count characters carefully. For keywords, count the entire string including commas.
-- **SEO keywords**: Use insights from Exa research. Include high-volume terms relevant to the app's category.
-- **release_notes.txt**: Summarize what's new based on recent git history. If this is an initial release, write first-release notes.
+- **SEO keywords**: If Exa research was done, use those insights. Otherwise, choose keywords based on app functionality.
+- **release_notes.txt**: Summarize what's new based on recent git history. If Git is unavailable or this is an initial release, write first-release notes.
 
 ### Step 4: Show summary
 
-Show the user a summary of all generated metadata — app name, subtitle, keywords, description length, etc. Ask for approval before proceeding.
+Show the user a summary of all generated metadata — app name, subtitle, keywords, description length, character counts for each field. Highlight any fields that are close to or over their character limit. Ask for approval before proceeding.
 
 ---
 
@@ -340,33 +538,37 @@ Run the full screenshot pipeline: capture from simulator, generate AI background
 
 ### Step 1: Prerequisites
 
-```bash
-# Check GEMINI_API_KEY
-echo "GEMINI_API_KEY: ${GEMINI_API_KEY:+SET}"
+Run the mode-specific preflight checks from the PREFLIGHT CHECKS section. Specifically verify:
 
-# Check Python deps
-python3 -c "from google import genai; from playwright.sync_api import sync_playwright; print('deps OK')" 2>&1
+1. **Simulator available** — if no simulator was detected, stop.
+2. **GEMINI_API_KEY** — if not set, ask the user. If they can't provide it, offer the **solid background alternative** (see below).
+3. **Python dependencies** — `google-genai`, `Pillow`, `playwright` + Chromium.
 
-# Check Playwright browsers
-python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(); b.close(); p.stop(); print('playwright OK')" 2>&1
+**Solid background alternative (no Gemini):**
+If the user cannot provide a Gemini API key, generate screenshots with CSS gradient backgrounds instead of AI-generated backgrounds. Use distinct dark gradients per screen:
+```css
+/* Example gradient themes per screen */
+background: linear-gradient(160deg, #0a2e2e 0%, #051a1a 50%, #000000 100%); /* teal */
+background: linear-gradient(160deg, #2e1a0a 0%, #1a0f05 50%, #000000 100%); /* amber */
+background: linear-gradient(160deg, #1a0a2e 0%, #0f051a 50%, #000000 100%); /* purple */
 ```
-
-If `GEMINI_API_KEY` is not set, ask the user to provide it (needed for Gemini Nano Banana 2 image generation).
-
-If Python deps are missing, install them:
-```bash
-pip3 install google-genai playwright
-python3 -m playwright install chromium
-```
+This produces acceptable screenshots without any API cost. Tell the user: "Using CSS gradient backgrounds. For AI-generated backgrounds, set `GEMINI_API_KEY` and re-run."
 
 ### Step 2: Analyze the app's screens
 
 Read the app's SwiftUI views to identify the **main screens** that should be showcased in App Store screenshots. Typically 3-5 screens that highlight core features.
 
+Look for:
+- `TabView` — each tab is likely a showcase screen
+- `NavigationStack` / `NavigationView` — main views in the navigation hierarchy
+- Views with the most UI complexity / user-facing features
+
 For each screen, determine:
 - A short identifier (e.g., `01_plan`, `02_spending`)
 - Which tab or navigation path leads to it (prefer URL schemes / deep links)
 - Marketing title and subtitle for each locale
+
+**Edge case — can't identify screens:** If the code structure is unclear, ask the user: "I found these views: [list]. Which 3-5 should be showcased, and how do I navigate to each one?"
 
 Ask the user to confirm the screen list and marketing copy before proceeding.
 
@@ -385,9 +587,23 @@ xcrun simctl boot "$SIMULATOR_UDID" 2>/dev/null || true
 xcodebuild build -scheme "<SCHEME>" \
     -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
     -derivedDataPath build/screenshots -quiet 2>&1 | tail -5
+```
 
+**Edge case — build fails:** If `xcodebuild build` returns a non-zero exit code:
+1. Show the last 20 lines of build output
+2. Tell the user: "Build failed. Fix the compilation errors and re-run `/appstore screenshots`."
+3. Do NOT proceed to screenshot capture.
+
+```bash
 # 4. Find and install the app
 APP_PATH=$(find build/screenshots -name "*.app" -path "*/Debug-iphonesimulator/*" | head -1)
+```
+
+**Edge case — no .app found:** If `APP_PATH` is empty:
+1. Check if the build output is in a different configuration: `find build/screenshots -name "*.app" | head -5`
+2. If still nothing: "Build succeeded but no .app was produced. Check the scheme's build settings."
+
+```bash
 xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
 
 # 5. Set dark mode BEFORE launching
@@ -418,7 +634,15 @@ for LOCALE in en-US ja de-DE; do
         xcrun simctl io "$SIMULATOR_UDID" screenshot \
             "fastlane/screenshots/$LOCALE/${SCREEN}.png"
 
-        # Verify capture
+        # Verify capture — retry if blank
+        FILE_SIZE=$(stat -f%z "fastlane/screenshots/$LOCALE/${SCREEN}.png" 2>/dev/null || echo "0")
+        if [ "$FILE_SIZE" -lt 10000 ]; then
+            echo "Screenshot may be blank (${FILE_SIZE} bytes), retrying..."
+            sleep 3
+            xcrun simctl io "$SIMULATOR_UDID" screenshot \
+                "fastlane/screenshots/$LOCALE/${SCREEN}.png"
+        fi
+
         sips -g pixelWidth -g pixelHeight \
             "fastlane/screenshots/$LOCALE/${SCREEN}.png" 2>/dev/null
     done
@@ -428,9 +652,11 @@ done
 xcrun simctl shutdown "$SIMULATOR_UDID" 2>/dev/null || true
 ```
 
-If the app doesn't support deep links or launch arguments for navigation, tell the user which screens need to be navigated to manually, or explore SwiftUI views for `TabView` / `NavigationStack` patterns to determine how to reach each screen.
+**Edge case — app crashes on launch:** If `xcrun simctl launch` fails or the app crashes immediately (check `xcrun simctl get_app_container` returns error), tell the user: "App crashed on launch in the simulator. Run it in Xcode to debug, then re-run `/appstore screenshots`."
 
 ### Step 4: Generate AI backgrounds with Gemini Nano Banana 2
+
+**Skip this step if using solid background alternative (no Gemini API key).**
 
 Use the **Nano Banana 2** model (`gemini-3.1-flash-image-preview`) for background generation:
 
@@ -465,11 +691,26 @@ for screen, colors in color_themes.items():
         ),
     )
 
+    # Check if response contains an image
+    image_saved = False
     for part in response.parts:
         if part.inline_data is not None:
             image = part.as_image()
             image.save(f"build/backgrounds/{screen}_bg.png")
+            image_saved = True
+            break
+
+    if not image_saved:
+        print(f"Warning: Gemini returned no image for {screen}. Using fallback gradient.")
+        # Create a solid color fallback with PIL
 ```
+
+**Edge case — Gemini API error:** If `generate_content` raises an exception (quota exceeded, invalid key, model unavailable):
+1. Log the error
+2. Tell the user: "Gemini API error: [message]. Falling back to CSS gradient backgrounds for remaining screens."
+3. Switch to the solid background alternative for remaining screens.
+
+**Edge case — Gemini returns no image:** Sometimes the model returns only text (e.g., content policy refusal). Check `response.parts` for `inline_data` — if none found, use a solid color fallback for that screen.
 
 Then upscale to exact target size:
 ```bash
@@ -481,7 +722,7 @@ sips -z 2796 1290 build/backgrounds/*_bg.png
 
 For each locale and screen, generate an HTML composition at 1x scale (430x932 CSS pixels = 1290x2796 at 3x):
 
-- Full-bleed AI background image
+- Full-bleed AI background image (or CSS gradient if using fallback)
 - Marketing title + subtitle at the top (white text with subtle shadow)
 - Device frame with the raw screenshot (rounded corners, shadow, ~68% of page height)
 - All images embedded as base64 data URIs for self-contained HTML
@@ -515,20 +756,48 @@ with sync_playwright() as p:
 
 Save final screenshots to `fastlane/screenshots/{locale}/{screen}_framed.png`.
 
+**Edge case — Playwright crash:** If Playwright fails to launch Chromium, try reinstalling: `python3 -m playwright install chromium`. If it still fails, tell the user the error and suggest checking their system's Chromium compatibility.
+
 ### Step 7: Verify
 
 ```bash
-# Check dimensions of exported screenshots
-sips -g pixelWidth -g pixelHeight fastlane/screenshots/*/01_*_framed.png
+# Check dimensions of all exported screenshots
+for f in fastlane/screenshots/*/*_framed.png; do
+    DIMS=$(sips -g pixelWidth -g pixelHeight "$f" 2>/dev/null | grep pixel | awk '{print $2}')
+    WIDTH=$(echo "$DIMS" | head -1)
+    HEIGHT=$(echo "$DIMS" | tail -1)
+    if [ "$WIDTH" != "1290" ] || [ "$HEIGHT" != "2796" ]; then
+        echo "WARNING: $f is ${WIDTH}x${HEIGHT}, expected 1290x2796"
+    else
+        echo "OK: $f"
+    fi
+done
 ```
 
-Expected: 1290x2796 for each file.
+**Edge case — wrong dimensions:** If screenshots are not 1290x2796, resize them:
+```bash
+sips -z 2796 1290 "fastlane/screenshots/{locale}/{screen}_framed.png"
+```
+Note: this may distort if the aspect ratio is different. Tell the user if resizing was needed.
 
 ---
 
 ## MODE: preview
 
 Generate the HTML preview dashboard showing all metadata and screenshots.
+
+### Prerequisite check
+
+Check if `scripts/preview_appstore.py` exists. If not, download it:
+```bash
+mkdir -p scripts
+curl -fsSL "https://raw.githubusercontent.com/mikwiseman/appstore-skill/main/scripts/preview_appstore.py" -o scripts/preview_appstore.py
+chmod +x scripts/preview_appstore.py
+```
+
+Check if `fastlane/metadata/` exists. If not, tell the user: "No metadata found. Run `/appstore setup` and `/appstore metadata` first."
+
+### Generate preview
 
 ```bash
 python3 scripts/preview_appstore.py
@@ -545,25 +814,44 @@ This generates `build/appstore_preview.html` — a self-contained dark-themed da
 
 The file auto-opens in the browser. Use `--no-open` to skip.
 
+**Edge case — partial metadata:** The preview handles missing files gracefully — it shows "Not set" for empty fields and a warning banner listing missing files. This is by design so the user can see what still needs to be filled in.
+
 ---
 
 ## MODE: upload
 
 Upload everything to App Store Connect via fastlane.
 
-First verify fastlane is configured:
-```bash
-test -f fastlane/Appfile && test -f fastlane/Fastfile && echo "fastlane OK" || echo "Run /appstore setup first"
-```
+### Prerequisite checks
 
-Then upload:
+1. **Fastlane installed:**
+```bash
+which fastlane 2>/dev/null && echo "OK" || echo "MISSING"
+```
+If missing: "Install fastlane: `gem install fastlane` or `brew install fastlane`"
+
+2. **Fastlane config exists:**
+```bash
+test -f fastlane/Appfile && test -f fastlane/Fastfile && echo "OK" || echo "MISSING"
+```
+If missing: "Run `/appstore setup` first to create fastlane configuration."
+
+3. **App Store Connect credentials:** Fastlane needs either:
+   - An API key (`.json` file) referenced in the Fastfile, or
+   - An `FASTLANE_USER` / `FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD` environment variable, or
+   - Interactive Apple ID login
+
+If `fastlane deliver` fails with authentication errors, tell the user: "Fastlane authentication failed. Set up App Store Connect API key: https://docs.fastlane.tools/app-store-connect-api/"
+
+### Upload
+
 ```bash
 fastlane ios upload_all
 ```
 
-This uploads metadata, screenshots, categories, and age rating. Uses App Store Connect API key authentication configured in the Fastfile.
-
 Verify: Check output for "fastlane.tools finished successfully".
+
+**Edge case — upload rejected:** If fastlane reports metadata validation errors (e.g., description too long, invalid category), show the specific error and tell the user which file to fix.
 
 ---
 
@@ -571,19 +859,27 @@ Verify: Check output for "fastlane.tools finished successfully".
 
 Run the complete pipeline in order. This is the **zero to App Store** flow.
 
-### 1. Setup
+### 1. Preflight
 
-Check if `fastlane/` exists. If not, run the **setup** mode to create the full directory structure. Ask the user for locales and contact info.
+Run all PREFLIGHT CHECKS. Show the status summary.
 
-### 2. Metadata
+### 2. Setup
 
-Run the **metadata** mode. Read the codebase, research via Exa, generate all metadata files. Show summary and ask for approval.
+Check if `fastlane/` exists with locale directories. If not, run the **setup** mode to create the full directory structure. Ask the user for locales and contact info.
 
-### 3. Screenshots
+If `fastlane/` already exists, tell the user and skip setup.
 
-Run the full **screenshots** pipeline (capture → Nano Banana 2 backgrounds → compose → export).
+### 3. Metadata
 
-### 4. Preview
+Run the **metadata** mode. Read the codebase, research via Exa (if available), generate all metadata files. Show summary and ask for approval.
+
+### 4. Screenshots
+
+Run the full **screenshots** pipeline (capture → Nano Banana 2 backgrounds or CSS gradients → compose → export).
+
+If the user wants to skip screenshots (e.g., they already have them or don't have Gemini/Playwright set up), allow them to skip this step.
+
+### 5. Preview
 
 Run the **preview** mode to generate the HTML dashboard. The preview opens in the browser automatically.
 
@@ -595,19 +891,23 @@ Run the **preview** mode to generate the HTML dashboard. The preview opens in th
 
 Wait for user confirmation before proceeding to upload.
 
-### 5. Upload
+### 6. Upload
 
 After user confirms, run the **upload** mode.
 
-### 6. Summary
+**Edge case — user says skip upload:** That's fine. The metadata and screenshots are saved locally. They can run `/appstore upload` later.
+
+### 7. Summary
 
 Show a completion summary:
 
 ```
 App Store Pipeline Complete!
 
-Metadata: [updated/unchanged]
-Screenshots: [list per locale, or "skipped"]
+Preflight: macOS ✓ | Xcode ✓ | Python ✓ | Exa [available/skipped] | Gemini [used/CSS fallback]
+Setup: [created/already existed]
+Metadata: [updated N locales / unchanged]
+Screenshots: [N screens x M locales / skipped]
 Preview: build/appstore_preview.html
 Upload: [success/skipped]
 ```
@@ -621,5 +921,7 @@ Now execute the requested mode. Follow the steps in order. After each step, veri
 If any step fails:
 1. Show the full error message
 2. Diagnose the root cause
-3. Fix the issue
-4. Retry the step
+3. Tell the user what went wrong and how to fix it
+4. Ask if they want to retry or skip the step
+
+**Write permission errors:** If any file write fails with a permission error (to `build/`, `fastlane/`, or `scripts/`), tell the user: "Permission denied writing to [path]. Check directory ownership and permissions: `ls -la [parent-dir]`"

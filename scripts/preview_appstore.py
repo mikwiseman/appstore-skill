@@ -782,8 +782,12 @@ def main():
 
     locales = detect_locales()
     if not locales:
-        print("Error: No locale directories found in fastlane/metadata/.", file=sys.stderr)
-        sys.exit(1)
+        print(
+            "No locale directories found in fastlane/metadata/.\n"
+            "Run /appstore setup first to create locale directories (e.g., en-US/).",
+            file=sys.stderr,
+        )
+        sys.exit(0)
 
     app_icon = detect_app_icon()
     app_name = detect_app_name(locales)
@@ -793,13 +797,23 @@ def main():
     print(f"Icon: {app_icon or 'not found'}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    html = generate_html(locales, app_name, app_icon)
-    OUTPUT_FILE.write_text(html, encoding="utf-8")
+    try:
+        html = generate_html(locales, app_name, app_icon)
+        OUTPUT_FILE.write_text(html, encoding="utf-8")
+    except PermissionError:
+        print(f"Error: Cannot write to {OUTPUT_FILE}. Check directory permissions.", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"Error writing preview: {e}", file=sys.stderr)
+        sys.exit(1)
     print(f"Preview generated: {OUTPUT_FILE}")
 
     if not no_open:
-        webbrowser.open(f"file://{OUTPUT_FILE}")
-        print("Opened in browser.")
+        try:
+            webbrowser.open(f"file://{OUTPUT_FILE}")
+            print("Opened in browser.")
+        except Exception:
+            print(f"Could not open browser. Open manually: file://{OUTPUT_FILE}")
 
 
 if __name__ == "__main__":

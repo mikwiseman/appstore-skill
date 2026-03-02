@@ -17,19 +17,21 @@ Point it at any iOS project and it generates the full `fastlane/` structure, wri
 
 ## Prerequisites
 
+**Required:**
+- macOS with [Xcode](https://developer.apple.com/xcode/) and iOS simulators
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
-- Xcode with iOS simulators
 - Python 3.9+
 
-**For screenshots** (optional):
-- `GEMINI_API_KEY` environment variable (for Nano Banana 2 AI backgrounds)
-- `pip3 install google-genai playwright && python3 -m playwright install chromium`
+**Optional — each feature degrades gracefully without these:**
 
-**For Exa SEO research** (optional):
-- Exa MCP server configured in Claude Code
-
-**For upload** (optional):
-- [fastlane](https://fastlane.tools) installed with App Store Connect credentials
+| Dependency | Used for | Without it |
+|-----------|----------|------------|
+| `GEMINI_API_KEY` | AI-generated backgrounds (Nano Banana 2) | CSS gradient backgrounds instead |
+| `google-genai` + `Pillow` | Gemini image generation | Auto-installed if needed |
+| `playwright` + Chromium | PNG export from HTML compositions | Auto-installed if needed |
+| [Exa MCP](https://exa.ai) | Competitor/keyword SEO research | Metadata from codebase analysis only |
+| [fastlane](https://fastlane.tools) | Upload to App Store Connect | Generate files locally, upload manually |
+| Git | Recent changes for release notes | Skips changelog analysis |
 
 ## Install
 
@@ -89,12 +91,22 @@ your-app/
 
 ## How it works
 
+### Preflight checks
+
+Every run starts with environment validation:
+- Platform (macOS required), Xcode CLI tools, Python version
+- Project detection (`.xcodeproj` or `.xcworkspace`, handles CocoaPods)
+- Simulator availability (prefers Pro Max, falls back to any iPhone)
+- Optional dependency status (Exa, Gemini, fastlane)
+
+The skill reports what's available and proceeds with what it has.
+
 ### Auto-detection
 
 The skill detects everything from your project — no configuration needed:
-- Xcode scheme from `xcodebuild -list`
-- Bundle ID from `project.pbxproj`
-- Latest iPhone Pro Max simulator (by UDID)
+- Xcode scheme from `xcodebuild -list` (handles workspaces, multiple schemes)
+- Bundle ID from `project.pbxproj` (resolves build-setting variables via `xcodebuild -showBuildSettings`)
+- Latest iPhone Pro Max simulator by UDID (falls back to Pro, then any iPhone)
 - App icon from `AppIcon.appiconset/`
 - Existing localizations from `.xcstrings`, `.lproj`, `.strings`
 
@@ -105,19 +117,38 @@ When generating metadata, the skill uses [Exa MCP](https://exa.ai) to research:
 - High-volume App Store search keywords
 - Metadata writing best practices
 
+If Exa MCP is not configured, metadata is generated from codebase analysis alone.
+
 ### Nano Banana 2 screenshots
 
 The screenshot pipeline uses Google's [Nano Banana 2](https://deepmind.google/blog/nano-banana-2-combining-pro-capabilities-with-lightning-fast-speed/) (`gemini-3.1-flash-image-preview`) to generate unique abstract backgrounds for each screen, then composes them with device frames and marketing copy via Playwright.
 
+If `GEMINI_API_KEY` is not available, the skill uses dark CSS gradient backgrounds instead — no API required.
+
 ### iOS simulator best practices
 
 The skill follows battle-tested simulator automation patterns:
-- UDID-based device selection (not names)
-- Boot once, reuse across captures
-- Deep links for screen navigation
-- Dark mode set before app launch
-- Deterministic waits instead of fixed sleeps
+- UDID-based device selection (not names — avoids ambiguity across runtimes)
+- Boot once, reuse across all captures
+- Deep links / URL schemes for screen navigation
+- Dark mode set before app launch (not after)
+- Deterministic waits with retry on blank screenshots
+- Clean state between locale switches
 - Shutdown after pipeline completes
+
+### Edge case handling
+
+The skill handles common failure scenarios:
+- **Build failures**: Shows errors, stops before attempting screenshot capture
+- **App crashes**: Detects launch failures, suggests debugging in Xcode
+- **Blank screenshots**: Retries with longer waits (up to 3 attempts)
+- **Missing dependencies**: Auto-installs Python packages, downloads preview script
+- **Gemini errors**: Falls back to CSS gradient backgrounds
+- **Exa unavailable**: Proceeds with codebase-only metadata
+- **No fastlane CLI**: Generates all files locally for manual upload
+- **Existing fastlane/**: Idempotent setup — never overwrites existing files
+- **Multiple Xcode projects/schemes**: Asks the user which to use
+- **No simulators**: Clear error with instructions to install runtimes
 
 ## Preview dashboard
 
