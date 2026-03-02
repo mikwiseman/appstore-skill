@@ -111,28 +111,144 @@ Update if app features have changed (gambling, violence, etc.).
 
 ## MODE: screenshots
 
-Run the full screenshot pipeline: capture, AI backgrounds, composition, and export.
+Run the full screenshot pipeline: capture from simulator, generate AI backgrounds, compose HTML, and export final PNGs.
 
-### Prerequisites Check
+**Target size**: 1290x2796 (iPhone Pro Max 6.7" App Store requirement)
+
+### Step 1: Prerequisites
 
 ```bash
-# 1. Check if screenshot scripts exist
-ls scripts/capture_screenshots.sh scripts/generate_backgrounds.py scripts/compose_screenshots.py scripts/export_screenshots.py 2>/dev/null
+# Check GEMINI_API_KEY
+echo "GEMINI_API_KEY: ${GEMINI_API_KEY:+SET}"
 
-# 2. Check Python dependencies for any scripts that exist
-python3 -c "from playwright.sync_api import sync_playwright; print('playwright OK')" 2>/dev/null
+# Check Python deps
+python3 -c "from google import genai; from playwright.sync_api import sync_playwright; print('deps OK')" 2>&1
+
+# Check Playwright browsers
+python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(); b.close(); p.stop(); print('playwright OK')" 2>&1
 ```
 
-If screenshot scripts don't exist, tell the user that the screenshot pipeline needs to be set up first.
+If `GEMINI_API_KEY` is not set, ask the user to provide it (needed for AI background generation via Gemini).
 
-### Steps
+If Python deps are missing, install them:
+```bash
+pip3 install google-genai playwright
+python3 -m playwright install chromium
+```
 
-1. **Capture raw screenshots** using the detected simulator
-2. **Generate backgrounds** (if background generation script exists)
-3. **Compose HTML pages** (if composition script exists)
-4. **Export final PNGs** (if export script exists)
+### Step 2: Analyze the app's screens
 
-Adapt the steps to whatever screenshot scripts exist in the project.
+Read the app's SwiftUI views / storyboards to identify the **main screens** that should be showcased in App Store screenshots. Typically 3-5 screens that highlight core features.
+
+For each screen, determine:
+- A short identifier (e.g., `01_plan`, `02_spending`)
+- Which tab or navigation path leads to it
+- Marketing title and subtitle for each locale
+
+Ask the user to confirm the screen list and marketing copy before proceeding.
+
+### Step 3: Capture raw screenshots from simulator
+
+For each locale and each screen:
+
+```bash
+# Boot simulator (use auto-detected device)
+SIMULATOR_ID=$(xcrun simctl list devices available | grep "<DEVICE>" | head -1 | grep -oE '[A-F0-9-]{36}')
+xcrun simctl boot "$SIMULATOR_ID" 2>/dev/null || true
+
+# Build the app
+xcodebuild build-for-testing -scheme "<SCHEME>" -destination "platform=iOS Simulator,name=<DEVICE>" -derivedDataPath build/screenshots -quiet
+
+# Install the app
+APP_PATH=$(find build/screenshots -name "*.app" -path "*/Debug-iphonesimulator/*" | head -1)
+xcrun simctl install "$SIMULATOR_ID" "$APP_PATH"
+
+# Set dark mode
+xcrun simctl ui "$SIMULATOR_ID" appearance dark
+
+# For each locale/screen: launch app, wait for UI, capture
+xcrun simctl launch "$SIMULATOR_ID" "<BUNDLE_ID>" -AppleLanguages "(<lang>)" -AppleLocale "<locale>"
+sleep 3
+xcrun simctl io "$SIMULATOR_ID" screenshot "fastlane/screenshots/<locale>/<screen>.png"
+```
+
+If the app supports launch arguments for navigating to specific screens (e.g., `--tab plan`), use them. Otherwise, you may need to navigate manually or ask the user how to reach each screen.
+
+### Step 4: Generate AI backgrounds with Gemini
+
+For each screen, generate a unique abstract background using the Gemini Flash Image API (Nanobanana2):
+
+```python
+from google import genai
+from google.genai import types
+
+client = genai.Client(api_key=api_key)
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash-preview-image-generation",
+    contents="Create a 1290x2796 abstract background image. Dark background. "
+             "Minimal geometric design with subtle shapes and gradients. "
+             "Very clean, modern aesthetic. No text, no objects, no people. "
+             "Suitable as a phone wallpaper background behind a device mockup.",
+    config=types.GenerateContentConfig(
+        response_modalities=["IMAGE", "TEXT"],
+    ),
+)
+```
+
+Each screen should have a distinct color theme (e.g., teal, amber, purple). Save to `build/backgrounds/<screen>_bg.png`.
+
+Then upscale to exact target size:
+```bash
+sips -z 2796 1290 build/backgrounds/*_bg.png
+```
+
+### Step 5: Compose HTML pages
+
+For each locale and screen, generate an HTML composition at 1x scale (430x932 CSS pixels = 1290x2796 at 3x):
+
+- Full-bleed AI background image
+- Marketing title + subtitle at the top (white text with subtle shadow)
+- Device frame with the raw screenshot (rounded corners, shadow, ~68% of page height)
+- All images embedded as base64 data URIs for self-contained HTML
+
+Save to `build/compositions/<locale>/<screen>.html`.
+
+**Key dimensions** (at 1x logical scale):
+- Page: 430x932
+- Device frame: ~292x634 (maintains iPhone aspect ratio)
+- Corner radius: 28px
+- Title: 28px bold, subtitle: 15px regular
+
+### Step 6: Export final PNGs with Playwright
+
+Render each HTML composition at 3x device scale to produce 1290x2796 PNGs:
+
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    context = browser.new_context(
+        viewport={"width": 430, "height": 932},
+        device_scale_factor=3,
+    )
+    page = context.new_page()
+    page.goto(f"file://{html_path}", wait_until="networkidle")
+    page.wait_for_timeout(500)
+    page.screenshot(path=output_path, full_page=False)
+```
+
+Save final screenshots to `fastlane/screenshots/<locale>/<screen>_framed.png`.
+
+### Step 7: Verify
+
+```bash
+# Check dimensions of exported screenshots
+sips -g pixelWidth -g pixelHeight fastlane/screenshots/*/01_*_framed.png
+```
+
+Expected: 1290x2796 for each file.
 
 ---
 
@@ -185,7 +301,7 @@ Check if metadata files exist and look current. If any are missing or stale, run
 
 ### 3. Screenshots
 
-Run the full **screenshots** pipeline if screenshot scripts exist. Otherwise, skip and inform the user.
+Run the full **screenshots** pipeline (capture → AI backgrounds → compose → export).
 
 ### 4. Preview
 
