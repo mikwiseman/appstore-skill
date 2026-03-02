@@ -8,6 +8,18 @@ argument-hint: [full|setup|metadata|screenshots|preview|upload]
 
 You are running the App Store pipeline. This skill takes a developer from **zero** (just an iOS project) to a fully published App Store listing: fastlane structure, metadata, screenshots, preview, and upload.
 
+## CONVERSATION STYLE
+
+**You are a guide, not a script runner.** Talk to the user at every step. Be adaptive:
+
+- **Before each major step**, briefly explain what you're about to do and why.
+- **When something is missing**, don't just report it — offer to fix it, walk through the fix, or ask what the user wants to do.
+- **When you need information**, ask one clear question at a time. Don't dump a list of 5 things you need.
+- **When a step succeeds**, confirm it briefly and move on. Don't over-explain success.
+- **When a step fails**, explain what went wrong in plain language, then offer the next action.
+- **Give the user choices** when there are multiple valid paths (e.g., "I can use CSS gradients instead — want to do that, or would you rather set up the API key first?").
+- **Never proceed past a blocker silently.** If something critical is missing, stop and help the user resolve it before continuing.
+
 ## ARGUMENTS
 
 The user can pass an optional mode:
@@ -112,8 +124,9 @@ python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright
 **For `upload` mode**, also check:
 ```bash
 which fastlane 2>/dev/null && echo "fastlane OK" || echo "fastlane MISSING"
+test -f fastlane/api_key.json && echo "ASC auth OK" || echo "ASC auth MISSING"
 ```
-If fastlane is not installed, tell the user: "Install fastlane: `gem install fastlane` or `brew install fastlane`"
+If fastlane is missing or ASC auth is not configured, the upload mode will walk the user through setting everything up interactively.
 
 **For `preview` mode**, also check:
 ```bash
@@ -139,6 +152,7 @@ Preflight:
   Exa MCP: [available/not configured]
   Gemini: [API key set/not set]
   Fastlane: [installed/not installed]
+  ASC Auth: [configured/not configured]
 ```
 
 Then proceed with the requested mode.
@@ -338,15 +352,43 @@ If boot fails with other errors, try:
 
 ---
 
-## ASK USER ONCE
+## GATHER USER INPUT
 
-Before proceeding with setup or metadata generation, ask the user for:
+Before proceeding with setup or metadata generation, you need a few things from the user. Ask conversationally, one topic at a time.
 
-1. **Locales**: Which locales to generate. Suggest based on detected localizations (e.g., if `.xcstrings` has `ja` and `de`, suggest `en-US`, `ja`, `de-DE`). If no localizations were detected, suggest `en-US` only. At minimum, always include `en-US`.
+### Locales
 
-2. **Contact info for App Review**: First name, last name, email, phone number. If `fastlane/metadata/review_information/` already has this data, show it and ask if it's still correct.
+Show what you detected from the codebase, then ask:
 
-Only ask once — reuse these values across all modes in the pipeline.
+> "I found these languages in your project: [list from .xcstrings/.lproj]. I'd suggest creating App Store listings for: **en-US**, **ja**, **de-DE** (mapped from your localizations). Does that look right, or would you like to add/remove any?"
+
+If no localizations were detected:
+
+> "I didn't find any localization files in your project. I'll set up **en-US** only. Want to add any other languages?"
+
+### Contact info for App Review
+
+If `fastlane/metadata/review_information/` already has data, show it:
+
+> "I found existing review contact info: [name, email, phone]. Is this still correct?"
+
+If no contact info exists:
+
+> "Apple's App Review team needs a contact for questions about your app. What's your **first name** and **last name**?"
+
+Then after they respond:
+
+> "And your **email** and **phone number** for App Review?"
+
+### Gemini API key (if screenshots mode and key not set)
+
+> "For AI-generated screenshot backgrounds, I need a Gemini API key. Do you have one?"
+>
+> If **yes**: "Paste it here, or set it as `export GEMINI_API_KEY=your-key` in your shell."
+>
+> If **no**: "You can get one free at https://aistudio.google.com/apikey — it takes about 30 seconds. Or I can skip AI backgrounds and use dark gradient backgrounds instead. What would you prefer?"
+
+Only ask what's needed for the current mode. Don't ask about Gemini for metadata-only runs, don't ask about contact info for preview-only runs.
 
 ---
 
@@ -388,7 +430,21 @@ default_platform(:ios)
 platform :ios do
   desc "Upload metadata, screenshots, and ratings to App Store Connect"
   lane :upload_all do
+    # API key authentication — set up by /appstore upload
+    api_key = nil
+    api_key_path = File.join(Dir.pwd, "fastlane", "api_key.json")
+    if File.exist?(api_key_path)
+      config = JSON.parse(File.read(api_key_path))
+      api_key = app_store_connect_api_key(
+        key_id: config["key_id"],
+        issuer_id: config["issuer_id"],
+        key_filepath: config["key_filepath"],
+        in_house: false
+      )
+    end
+
     deliver(
+      api_key: api_key,
       skip_binary_upload: true,
       skip_app_version_update: true,
       force: true,
@@ -820,38 +876,142 @@ The file auto-opens in the browser. Use `--no-open` to skip.
 
 ## MODE: upload
 
-Upload everything to App Store Connect via fastlane.
+Upload everything to App Store Connect via fastlane. This mode walks the user through the entire process — installing fastlane, setting up authentication, and uploading.
 
-### Prerequisite checks
+### Step 1: Check fastlane
 
-1. **Fastlane installed:**
 ```bash
-which fastlane 2>/dev/null && echo "OK" || echo "MISSING"
+which fastlane 2>/dev/null && fastlane --version 2>/dev/null | head -1
 ```
-If missing: "Install fastlane: `gem install fastlane` or `brew install fastlane`"
 
-2. **Fastlane config exists:**
+**If fastlane is not installed**, ask the user:
+
+> "Fastlane is needed to upload to App Store Connect. I can install it for you. Which method do you prefer?"
+> 1. `brew install fastlane` (recommended if you use Homebrew)
+> 2. `gem install fastlane` (Ruby gem)
+
+Install whichever they choose. If they're unsure, use Homebrew.
+
+### Step 2: Check fastlane config
+
 ```bash
 test -f fastlane/Appfile && test -f fastlane/Fastfile && echo "OK" || echo "MISSING"
 ```
-If missing: "Run `/appstore setup` first to create fastlane configuration."
 
-3. **App Store Connect credentials:** Fastlane needs either:
-   - An API key (`.json` file) referenced in the Fastfile, or
-   - An `FASTLANE_USER` / `FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD` environment variable, or
-   - Interactive Apple ID login
+If missing, tell the user: "Fastlane config doesn't exist yet. Let me create it." Then run the setup steps from MODE: setup (Appfile + Fastfile only).
 
-If `fastlane deliver` fails with authentication errors, tell the user: "Fastlane authentication failed. Set up App Store Connect API key: https://docs.fastlane.tools/app-store-connect-api/"
+### Step 3: Check App Store Connect authentication
 
-### Upload
+This is the critical step. Check for an existing API key:
+
+```bash
+# Check for API key file
+test -f fastlane/api_key.json && echo "api_key.json found" || echo "no api_key.json"
+
+# Check for environment-based auth
+echo "FASTLANE_USER: ${FASTLANE_USER:+SET}"
+echo "FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD: ${FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD:+SET}"
+```
+
+**If `fastlane/api_key.json` exists**, read it and confirm with the user:
+> "Found an existing API key configuration. Want to use it, or set up a new one?"
+
+**If no authentication is configured**, walk the user through API key setup:
+
+> "To upload to App Store Connect, you need an API key. This is a one-time setup. I'll walk you through it step by step."
+
+#### Interactive API Key Setup
+
+**Ask the user:** "Do you already have an App Store Connect API key, or do you need to create one?"
+
+**If they need to create one**, guide them:
+
+> Here's how to create an App Store Connect API key:
+>
+> 1. Open **App Store Connect**: https://appstoreconnect.apple.com/access/integrations/api
+> 2. Click **"Generate API Key"** (or "+" if you already have keys)
+> 3. Give it a name (e.g., "Fastlane Upload")
+> 4. For role, select **"App Manager"** (minimum needed for metadata/screenshot uploads)
+> 5. Click **"Generate"**
+> 6. **Download the .p8 file** — you can only download it ONCE. Save it somewhere safe.
+> 7. Note the **Key ID** (shown in the keys list) and **Issuer ID** (shown at the top of the page)
+>
+> Tell me when you have the Key ID, Issuer ID, and the .p8 file path, and I'll set everything up.
+
+**Then ask for each piece of information one at a time:**
+
+1. "What's the **Key ID**? (It looks like a 10-character alphanumeric string, e.g., `ABC1234DEF`)"
+2. "What's the **Issuer ID**? (It looks like a UUID, e.g., `12345678-1234-1234-1234-123456789012`)"
+3. "Where is the **.p8 key file**? (Drag it into the terminal or paste the full path)"
+
+**Validate each input:**
+- Key ID: should be ~10 alphanumeric characters
+- Issuer ID: should be a UUID format
+- .p8 file: verify it exists with `test -f "<path>"`
+
+**If they already have a key**, ask for the same three pieces of information.
+
+#### Save the API key configuration
+
+Once you have all three values, copy the .p8 file and create the config:
+
+```bash
+# Copy the .p8 key into the fastlane directory
+cp "<user-provided-path>" fastlane/AuthKey_<KEY_ID>.p8
+```
+
+Write `fastlane/api_key.json`:
+```json
+{
+  "key_id": "<KEY_ID>",
+  "issuer_id": "<ISSUER_ID>",
+  "key_filepath": "fastlane/AuthKey_<KEY_ID>.p8",
+  "in_house": false
+}
+```
+
+**Add the key file to `.gitignore`** (it's a secret):
+```bash
+# Check if already ignored
+grep -q 'AuthKey_' .gitignore 2>/dev/null || echo -e '\n# App Store Connect API key (secret)\nfastlane/AuthKey_*.p8\nfastlane/api_key.json' >> .gitignore
+```
+
+Tell the user:
+> "API key configured. The .p8 file and api_key.json are added to .gitignore so they won't be committed."
+
+#### Verify authentication works
+
+Run a quick test:
+```bash
+fastlane run app_store_connect_api_key key_id:"<KEY_ID>" issuer_id:"<ISSUER_ID>" key_filepath:"fastlane/AuthKey_<KEY_ID>.p8" 2>&1 | tail -5
+```
+
+If it fails, show the error and help debug:
+- "Invalid key" → wrong Key ID or Issuer ID, ask user to double-check
+- "Key file not found" → wrong path, ask user to verify
+- "Unauthorized" → key may not have the right permissions, guide user to check role in ASC
+
+### Step 4: Upload
+
+Tell the user: "Everything is set up. Uploading metadata and screenshots to App Store Connect now..."
 
 ```bash
 fastlane ios upload_all
 ```
 
-Verify: Check output for "fastlane.tools finished successfully".
+### Step 5: Verify
 
-**Edge case — upload rejected:** If fastlane reports metadata validation errors (e.g., description too long, invalid category), show the specific error and tell the user which file to fix.
+Check the output for success or failure:
+
+- **"fastlane.tools finished successfully"** → Tell the user: "Upload complete! Your metadata and screenshots are now in App Store Connect. Check it at https://appstoreconnect.apple.com"
+
+- **Metadata validation errors** (e.g., "description too long", "invalid category") → Show the specific error, tell the user which file to fix, offer to fix it and re-upload.
+
+- **Authentication errors** → Re-run Step 3 to set up credentials again.
+
+- **Network errors** → "Upload failed due to a network error. Want to retry?"
+
+- **"App not found"** → The bundle ID in `Appfile` doesn't match any app in ASC. Ask the user to verify their bundle ID and that the app exists in App Store Connect.
 
 ---
 
@@ -893,9 +1053,9 @@ Wait for user confirmation before proceeding to upload.
 
 ### 6. Upload
 
-After user confirms, run the **upload** mode.
+After user confirms, run the **upload** mode. If App Store Connect authentication isn't configured yet, the upload mode will walk the user through the API key setup interactively before uploading.
 
-**Edge case — user says skip upload:** That's fine. The metadata and screenshots are saved locally. They can run `/appstore upload` later.
+If the user wants to skip upload, that's fine — tell them: "Everything is saved locally. You can upload anytime with `/appstore upload`."
 
 ### 7. Summary
 
