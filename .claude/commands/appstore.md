@@ -19,6 +19,7 @@ You are running the App Store pipeline. This skill takes a developer from **zero
 - **When a step fails**, explain what went wrong in plain language, then offer the next action.
 - **Give the user choices** when there are multiple valid paths (e.g., "I can use CSS gradients instead — want to do that, or would you rather set up the API key first?").
 - **Never proceed past a blocker silently.** If something critical is missing, stop and help the user resolve it before continuing.
+- **NEVER fabricate, guess, or invent user data.** This includes names, email addresses, phone numbers, URLs, company names, or any personal information. If you don't have it, you MUST ask the user and wait for their response. NEVER use placeholder values like "+1 000 000 0000" or "user@example.com". Leave fields empty until the user provides real data.
 
 ## ARGUMENTS
 
@@ -366,19 +367,23 @@ If no localizations were detected:
 
 > "I didn't find any localization files in your project. I'll set up **en-US** only. Want to add any other languages?"
 
-### Contact info for App Review
+### Contact info for App Review (MANDATORY — NEVER SKIP OR GUESS)
 
-If `fastlane/metadata/review_information/` already has data, show it:
+**CRITICAL: You MUST ask the user for ALL contact details. NEVER fabricate, guess, or use placeholder values for names, email, or phone. If the user hasn't provided this info, the review_information files MUST remain empty until they do.**
+
+If `fastlane/metadata/review_information/` already has non-empty data, show it and confirm:
 
 > "I found existing review contact info: [name, email, phone]. Is this still correct?"
 
-If no contact info exists:
+If no contact info exists or files are empty, you MUST ask — do NOT proceed without real answers:
 
 > "Apple's App Review team needs a contact for questions about your app. What's your **first name** and **last name**?"
 
-Then after they respond:
+Wait for their response. Then:
 
-> "And your **email** and **phone number** for App Review?"
+> "And your **email address** and **phone number** for App Review? (This must be a real phone number where Apple can reach you.)"
+
+Wait for their response. Only after receiving real values from the user, write them to the review_information files.
 
 ### Gemini API key (if screenshots mode and key not set)
 
@@ -465,7 +470,7 @@ For each locale, create empty files (only if they don't already exist):
 
 For `review_information/`:
 - `first_name.txt`, `last_name.txt`, `email_address.txt`, `phone_number.txt`, `notes.txt`
-- Pre-fill with the contact info the user provided.
+- **ONLY** fill these if the user has explicitly provided their contact info in this session. If they haven't been asked yet or haven't responded, leave the files empty — NEVER write placeholder or fabricated values. Ask the user for this info before writing.
 
 Shared files:
 - `copyright.txt` (e.g., "2026 CompanyName")
